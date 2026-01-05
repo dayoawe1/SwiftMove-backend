@@ -31,12 +31,12 @@ async def send_chat_message(message_data: ChatMessageCreate):
         # Import the LLM chat integration
         from emergentintegrations.llm.chat import LlmChat, UserMessage
         
-        # Get API key from environment
-        api_key = os.environ.get('EMERGENT_LLM_KEY')
+        # Get API key from environment (try Emergent first, then OpenAI)
+        api_key = os.environ.get('EMERGENT_LLM_KEY') or os.environ.get('OPENAI_API_KEY')
         if not api_key:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Chatbot service is not properly configured"
+                detail="Chatbot service is not properly configured - no API key found"
             )
         
         # Store user message
@@ -146,18 +146,61 @@ Current user message: {message_data.message}
 
 Respond as Favour in a helpful, friendly manner."""
 
-        # Initialize chat with LLM
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=message_data.sessionId,
-            system_message=system_message
-        ).with_model("openai", "gpt-4o-mini")
+        # Initialize chat with OpenAI directly as fallback
+        try:
+            # Try to use emergentintegrations if available
+            from emergentintegrations.llm.chat import LlmChat, UserMessage
+            
+            # Initialize chat with LLM
+            chat = LlmChat(
+                api_key=api_key,
+                session_id=message_data.sessionId,
+                system_message=system_message
+            ).with_model("openai", "gpt-4o-mini")
+            
+            # Create user message for LLM
+            llm_user_message = UserMessage(text=message_data.message)
+            
+            # Get response from LLM
+            bot_response = await chat.send_message(llm_user_message)
+            
+        except ImportError:
+            # Fallback to direct OpenAI API call
+            import openai
+            
+            try:
+                client = openai.OpenAI(api_key=api_key)
+                
+                # Build messages for OpenAI chat completion
+                messages = [
+                    {"role": "system", "content": system_message}
+                ]
+                
+                # Add conversation history
+                for msg in recent_messages[:-1]:  # Exclude current message
+                    role = "user" if msg['sender'] == 'user' else "assistant"
+                    messages.append({"role": role, "content": msg['message']})
+                
+                # Add current user message
+                messages.append({"role": "user", "content": message_data.message})
+                
+                # Get response from OpenAI
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    max_tokens=500,
+                    temperature=0.7
+                )
+                
+                bot_response = response.choices[0].message.content
+                
+            except Exception as openai_error:
+                print(f"OpenAI API error: {str(openai_error)}")
+                raise Exception("LLM service unavailable")
         
-        # Create user message for LLM
-        llm_user_message = UserMessage(text=message_data.message)
-        
-        # Get response from LLM
-        bot_response = await chat.send_message(llm_user_message)
+        except Exception as e:
+            print(f"LLM error: {str(e)}")
+            raise Exception("LLM service unavailable")
         
         # Store bot response
         bot_message = ChatMessage(
