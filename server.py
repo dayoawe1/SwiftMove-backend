@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 
 # Import route modules
-from routes import bookings, contacts, quotes, services, chat
+from routes import bookings, contacts, quotes, services, chat, admin
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -33,6 +33,7 @@ contacts.set_database(db)
 quotes.set_database(db)
 services.set_database(db)
 chat.set_database(db)
+admin.set_database(db)
 
 # Define Models (keeping existing for compatibility)
 class StatusCheck(BaseModel):
@@ -66,6 +67,7 @@ api_router.include_router(contacts.router)
 api_router.include_router(quotes.router)
 api_router.include_router(services.router)
 api_router.include_router(chat.router)
+api_router.include_router(admin.router)
 
 # Include the router in the main app
 app.include_router(api_router)

@@ -35,12 +35,12 @@ async def send_chat_message(message_data: ChatMessageCreate):
         if not api_key:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Chatbot service is not properly configured - OPENAI_API_KEY missing"
+                detail="OPENAI_API_KEY is not configured"
             )
 
         client = openai.OpenAI(api_key=api_key)
 
-        # Store user message
+        # Save user message
         user_message = ChatMessage(
             sessionId=message_data.sessionId,
             message=message_data.message,
@@ -59,7 +59,7 @@ async def send_chat_message(message_data: ChatMessageCreate):
         )
 
         if is_quote_request:
-            quote_inquiry = {
+            await db.contacts.insert_one({
                 "id": str(uuid.uuid4()),
                 "name": f"ChatBot User - Session {message_data.sessionId[-8:]}",
                 "email": "chatbot-quote@pending.com",
@@ -71,10 +71,9 @@ async def send_chat_message(message_data: ChatMessageCreate):
                 "source": "chatbot",
                 "createdAt": datetime.utcnow(),
                 "updatedAt": datetime.utcnow()
-            }
-            await db.contacts.insert_one(quote_inquiry)
+            })
 
-        # Fetch recent chat history
+        # Get recent chat history
         recent_messages = await db.chat_messages.find(
             {"sessionId": message_data.sessionId}
         ).sort("timestamp", -1).limit(10).to_list(10)
@@ -92,6 +91,11 @@ async def send_chat_message(message_data: ChatMessageCreate):
             for keyword in spanish_keywords
         )
 
+        conversation_context = "".join(
+            f"{m['sender']}: {m['message']}\n"
+            for m in recent_messages[:-1]
+        )
+
         # System prompt
         if is_spanish:
             system_message = f"""
@@ -101,13 +105,13 @@ Servicios:
 - Mudanzas residenciales y comerciales
 - Limpieza de casas y oficinas
 
-Horarios:
+Horario:
 - Lunes a Sábado, 8AM – 6PM
-Teléfono: (501) 575-5189
+Teléfono: (812) 669-4165
 Áreas: Ohio, Kentucky, Indiana
 
 Conversación reciente:
-{''.join([f"{m['sender']}: {m['message']}\n" for m in recent_messages[:-1]])}
+{conversation_context}
 
 Responde en ESPAÑOL de forma profesional y amigable.
 """
@@ -121,11 +125,11 @@ Services:
 
 Hours:
 - Monday – Saturday, 8AM – 6PM
-Phone: (501) 575-5189
+Phone: (812) 669-4165
 Service Areas: Ohio, Kentucky, Indiana
 
 Recent conversation:
-{''.join([f"{m['sender']}: {m['message']}\n" for m in recent_messages[:-1]])}
+{conversation_context}
 
 Respond in a friendly, professional tone.
 """
@@ -143,13 +147,13 @@ Respond in a friendly, professional tone.
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            max_tokens=500,
-            temperature=0.7
+            temperature=0.7,
+            max_tokens=500
         )
 
         bot_response = response.choices[0].message.content
 
-        # Store bot message
+        # Save bot response
         bot_message = ChatMessage(
             sessionId=message_data.sessionId,
             message=bot_response,
@@ -175,16 +179,16 @@ Respond in a friendly, professional tone.
     except Exception as e:
         print(f"Chat error: {str(e)}")
 
-        fallback_message = ChatMessage(
+        fallback = ChatMessage(
             sessionId=message_data.sessionId,
             message=(
                 "I'm sorry, I'm having trouble responding right now. "
-                "Please call us at (501) 575-5189 for immediate assistance."
+                "Please call us at (812) 669-4165 for immediate assistance."
             ),
             sender="bot"
         )
-        await db.chat_messages.insert_one(fallback_message.dict())
-        return fallback_message
+        await db.chat_messages.insert_one(fallback.dict())
+        return fallback
 
 
 @router.get("/messages/{session_id}", response_model=List[ChatMessage])
@@ -197,9 +201,9 @@ async def get_chat_messages(session_id: str):
 
 @router.delete("/session/{session_id}")
 async def clear_chat_session(session_id: str):
-    await db.chat_messages.delete_many({"sessionId": session_id})
+    result = await db.chat_messages.delete_many({"sessionId": session_id})
     await db.chat_sessions.delete_one({"id": session_id})
-    return {"message": f"Session {session_id} cleared"}
+    return {"message": f"Cleared {result.deleted_count} messages"}
 
 
 @router.get("/quote-requests")
