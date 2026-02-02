@@ -8,7 +8,7 @@ import os
 import uuid
 import re
 from dotenv import load_dotenv
-from openai import OpenAI
+import openai
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -185,13 +185,14 @@ async def get_session_contact_info(session_id):
 async def send_chat_message(message_data: ChatMessageCreate):
     """Send a message to the chatbot and get a response"""
     try:
-        api_key = os.environ.get("OPENAI_API_KEY")
+        # Get OpenAI API key from environment
+        api_key = os.environ.get('OPENAI_API_KEY')
         if not api_key:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="OPENAI_API_KEY is not configured"
+                detail="Chatbot service is not properly configured - no OpenAI API key found"
             )
-
+        
         # Store user message
         user_message = ChatMessage(
             sessionId=message_data.sessionId,
@@ -199,11 +200,11 @@ async def send_chat_message(message_data: ChatMessageCreate):
             sender="user"
         )
         await db.chat_messages.insert_one(user_message.dict())
-
+        
         # Get collected contact info so far
         contact_info = await get_session_contact_info(message_data.sessionId)
-
-        # Check missing contact info
+        
+        # Check what info is still needed
         missing_info = []
         if not contact_info['name']:
             missing_info.append('name')
@@ -211,7 +212,7 @@ async def send_chat_message(message_data: ChatMessageCreate):
             missing_info.append('email')
         if not contact_info['phone']:
             missing_info.append('phone')
-
+        
         # Extract info from current message
         current_info = extract_contact_info(message_data.message)
         if current_info['email']:
@@ -222,7 +223,7 @@ async def send_chat_message(message_data: ChatMessageCreate):
             contact_info['phone'] = current_info['phone']
             if 'phone' in missing_info:
                 missing_info.remove('phone')
-
+        
         # Check if current message could be a name
         text = message_data.message
         if 'name' in missing_info and len(text.split()) <= 4:
@@ -238,24 +239,25 @@ async def send_chat_message(message_data: ChatMessageCreate):
                 contact_info['name'] = text.title()
                 if 'name' in missing_info:
                     missing_info.remove('name')
-
+        
         # Get recent chat history for context (last 10 messages)
         recent_messages = await db.chat_messages.find(
             {"sessionId": message_data.sessionId}
         ).sort("timestamp", -1).limit(10).to_list(10)
-
-        # Build conversation context
+        
+        # Build conversation history for context
         conversation_context = ""
         if recent_messages:
             recent_messages.reverse()
             for msg in recent_messages[:-1]:
                 conversation_context += f"{msg['sender']}: {msg['message']}\n"
-
+        
         # Detect if the message is in Spanish
         spanish_keywords = ['hola', 'buenos', 'días', 'tardes', 'noches', 'gracias', 'por favor', 'ayuda', 'servicio', 'mudanza', 'limpieza', 'precio', 'costo', '¿', '¡', 'español', 'habla', 'hablas']
         is_spanish = any(keyword in message_data.message.lower() for keyword in spanish_keywords)
-
-        # Build info about collected status
+        
+        # Build info about what's collected
+        # Check what service details are still needed
         missing_service_details = []
         if contact_info['service_interest'] == 'moving':
             if not contact_info['from_address']:
@@ -273,7 +275,7 @@ async def send_chat_message(message_data: ChatMessageCreate):
                 missing_service_details.append('preferred cleaning date')
             if not contact_info['property_size']:
                 missing_service_details.append('property size (bedrooms or square footage)')
-
+        
         collected_status = f"""
 Currently collected customer information:
 - Name: {contact_info['name'] or 'NOT YET COLLECTED'}
@@ -290,8 +292,8 @@ Currently collected customer information:
 Missing contact information that MUST be collected: {', '.join(missing_info) if missing_info else 'All contact info collected!'}
 Missing service details to collect: {', '.join(missing_service_details) if missing_service_details else 'Service details collected or not applicable yet'}
 """
-
-        # System message
+        
+        # System message for Swift Move and Clean chatbot
         if is_spanish:
             system_message = f"""Eres Favour, un chatbot de servicio al cliente para Swift Move and Clean, una empresa profesional de mudanzas y limpieza que sirve Indiana.
 
@@ -352,11 +354,190 @@ Current user message: {message_data.message}
 
 Respond as Favour in a helpful, friendly manner. Remember: DO NOT provide any prices, collect all service details and contact information conversationally."""
 
-        # ---------- OPENAI ONLY ----------
-        client = OpenAI(api_key=api_key)
+        # Use OpenAI directly
+        try:
+            client = openai.OpenAI(api_key=api_key)
+            
+            messages = [
+                {"role": "system", "content": system_message}
+            ]
+            
+            for msg in recent_messages[:-1]:
+                role = "user" if msg['sender'] == 'user' else "assistant"
+                messages.append({"role": role, "content": msg['message']})
+            
+            messages.append({"role": "user", "content": message_data.message})
+            
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                max_tokens=500,
+                temperature=0.7
+            )
+            
+            bot_response = response.choices[0].message.content
+            
+        except Exception as openai_error:
+            print(f"OpenAI API error: {str(openai_error)}")
+            raise Exception("OpenAI service unavailable")
+        
+        # Store bot response
+        bot_message = ChatMessage(
+            sessionId=message_data.sessionId,
+            message=bot_response,
+            sender="bot"
+        )
+        await db.chat_messages.insert_one(bot_message.dict())
+        
+        # Update or create chat session record with contact info
+        session_data = {
+            "id": message_data.sessionId,
+            "lastActivity": datetime.utcnow(),
+            "updatedAt": datetime.utcnow()
+        }
+        
+        if contact_info['name']:
+            session_data['customerName'] = contact_info['name']
+        if contact_info['email']:
+            session_data['customerEmail'] = contact_info['email']
+        if contact_info['phone']:
+            session_data['customerPhone'] = contact_info['phone']
+        if contact_info['service_interest']:
+            session_data['serviceInterest'] = contact_info['service_interest']
+        if contact_info['service_type']:
+            session_data['serviceType'] = contact_info['service_type']
+        if contact_info['from_address']:
+            session_data['fromAddress'] = contact_info['from_address']
+        if contact_info['to_address']:
+            session_data['toAddress'] = contact_info['to_address']
+        if contact_info['move_date']:
+            session_data['preferredDate'] = contact_info['move_date']
+        if contact_info['property_size']:
+            session_data['propertySize'] = contact_info['property_size']
+        
+        await db.chat_sessions.update_one(
+            {"id": message_data.sessionId},
+            {
+                "$set": session_data,
+                "$setOnInsert": {"createdAt": datetime.utcnow()}
+            },
+            upsert=True
+        )
+        
+        # If we have collected at least some contact info, store/update in contacts for admin
+        if contact_info['name'] or contact_info['email'] or contact_info['phone']:
+            # Check if contact already exists for this session
+            existing_contact = await db.contacts.find_one({"sessionId": message_data.sessionId, "source": "chatbot"})
+            
+            # Build detailed message with all collected info
+            service_details = []
+            service_details.append(f"Service Type: {contact_info['service_type'] or contact_info['service_interest'] or 'General Inquiry'}")
+            if contact_info['from_address']:
+                service_details.append(f"From Address: {contact_info['from_address']}")
+            if contact_info['to_address']:
+                service_details.append(f"To Address: {contact_info['to_address']}")
+            if contact_info['move_date']:
+                service_details.append(f"Preferred Date: {contact_info['move_date']}")
+            if contact_info['property_size']:
+                service_details.append(f"Property Size: {contact_info['property_size']}")
+            if contact_info['special_items']:
+                service_details.append(f"Special Items: {contact_info['special_items']}")
+            if contact_info['additional_details']:
+                service_details.append(f"Conversation Notes: {contact_info['additional_details']}")
+            
+            contact_data = {
+                "name": contact_info['name'] or f"Chat User - {message_data.sessionId[-8:]}",
+                "email": contact_info['email'] or "pending@chat.com",
+                "phone": contact_info['phone'] or "Pending",
+                "subject": f"Chat Inquiry - {contact_info['service_type'] or contact_info['service_interest'] or 'General'}",
+                "message": "\n".join(service_details),
+                "status": "new",
+                "sessionId": message_data.sessionId,
+                "source": "chatbot",
+                "updatedAt": datetime.utcnow()
+            }
+            
+            if existing_contact:
+                await db.contacts.update_one(
+                    {"sessionId": message_data.sessionId, "source": "chatbot"},
+                    {"$set": contact_data}
+                )
+            else:
+                contact_data["id"] = str(uuid.uuid4())
+                contact_data["createdAt"] = datetime.utcnow()
+                await db.contacts.insert_one(contact_data)
+        
+        return bot_message
+        
+    except Exception as e:
+        print(f"Chat error: {str(e)}")
+        fallback_message = ChatMessage(
+            sessionId=message_data.sessionId,
+            message="I'm sorry, I'm having trouble responding right now. Please call us at (812) 669-4165 or use our booking form for assistance with your moving and cleaning needs.",
+            sender="bot"
+        )
+        await db.chat_messages.insert_one(fallback_message.dict())
+        return fallback_message
 
-        messages = [{"role": "system", "content": system_message}]
+@router.get("/messages/{session_id}", response_model=List[ChatMessage])
+async def get_chat_messages(session_id: str):
+    """Get all messages for a chat session"""
+    try:
+        messages = await db.chat_messages.find(
+            {"sessionId": session_id}
+        ).sort("timestamp", 1).to_list(1000)
+        return [ChatMessage(**message) for message in messages]
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching chat messages: {str(e)}"
+        )
 
-        for msg in recent_messages[:-1]:
-            role = "user" if msg["sender"] == "user" else "assistant"
-           
+@router.delete("/session/{session_id}")
+async def clear_chat_session(session_id: str):
+    """Clear all messages for a chat session"""
+    try:
+        result = await db.chat_messages.delete_many({"sessionId": session_id})
+        await db.chat_sessions.delete_one({"id": session_id})
+        # Also remove from contacts
+        await db.contacts.delete_one({"sessionId": session_id, "source": "chatbot"})
+        return {"message": f"Cleared {result.deleted_count} messages from session {session_id}"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error clearing chat session: {str(e)}"
+        )
+
+@router.get("/sessions")
+async def get_chat_sessions():
+    """Get all chat sessions with customer info"""
+    try:
+        sessions = await db.chat_sessions.find().sort("lastActivity", -1).to_list(100)
+        for session in sessions:
+            if '_id' in session:
+                session['_id'] = str(session['_id'])
+        return sessions
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching chat sessions: {str(e)}"
+        )
+
+@router.get("/quote-requests")
+async def get_chatbot_quote_requests():
+    """Get all quote requests from chatbot conversations"""
+    try:
+        quote_requests = await db.contacts.find(
+            {"source": "chatbot"}
+        ).sort("createdAt", -1).to_list(100)
+        
+        for request in quote_requests:
+            if '_id' in request:
+                request['_id'] = str(request['_id'])
+        
+        return quote_requests
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching chatbot quote requests: {str(e)}"
+        )
