@@ -28,8 +28,10 @@ def set_database(database: AsyncIOMotorDatabase):
 async def create_contact_message(message_data: ContactMessageCreate):
     """Submit a contact form message"""
     try:
-        # Create contact message object
-        message = ContactMessage(**message_data.dict())
+        # Create contact message object with source identifier
+        message_dict = message_data.dict()
+        message_dict["source"] = "contact_form"  # Mark as contact form submission
+        message = ContactMessage(**message_dict)
         
         # Insert into database
         result = await db.contacts.insert_one(message.dict())

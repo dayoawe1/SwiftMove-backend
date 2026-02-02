@@ -116,7 +116,7 @@ def get_default_testimonials():
             name="Sarah Johnson",
             role="Homeowner",
             rating=5,
-            text="SwiftMove made our family's relocation completely stress-free. The team was professional, careful with our belongings, and the cleaning service left our old home spotless. Highly recommend!",
+            text="Swift Move and Clean made our family's relocation completely stress-free. The team was professional, careful with our belongings, and the cleaning service left our old home spotless. Highly recommend!",
             location="Downtown"
         ),
         Testimonial(
@@ -132,7 +132,7 @@ def get_default_testimonials():
             name="Emily Rodriguez",
             role="Property Manager",
             rating=5,
-            text="We use SwiftMove for all our tenant move-outs. Their cleaning service is thorough and reliable, always leaving units rent-ready. Great communication and fair pricing.",
+            text="We use Swift Move and Clean for all our tenant move-outs. Their cleaning service is thorough and reliable, always leaving units rent-ready. Great communication and fair pricing.",
             location="Eastside"
         ),
         Testimonial(
